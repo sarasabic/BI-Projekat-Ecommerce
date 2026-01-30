@@ -1,0 +1,166 @@
+{
+  "name": "Load staging data",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Count records that will be loaded\nSELECT \n  COUNT(*) as total_records,\n  COUNT(CASE WHEN InvoiceNo LIKE 'C%' THEN 1 END) as cancelled_count,\n  COUNT(CASE WHEN Quantity < 0 THEN 1 END) as return_count\nFROM raw_transactions\nWHERE Quantity > 0 \n  AND CAST(UnitPrice AS DECIMAL(10,2)) > 0\n  AND InvoiceNo IS NOT NULL\n  AND StockCode IS NOT NULL",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        -48,
+        448
+      ],
+      "id": "7121d061-de50-4ed6-ab98-502a4ea63b1d",
+      "name": "Preview Record Count",
+      "credentials": {
+        "mySql": {
+          "id": "qsuneFctMHzgzF9S",
+          "name": "source"
+        }
+      },
+      "notes": "Shows how many records will be loaded\n• Total valid records\n• Cancelled orders\n• Returns"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "check-count",
+              "leftValue": "={{ $json.total_records }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        192,
+        448
+      ],
+      "id": "7fafa206-5c53-4a9f-8571-d5ac4b5960fb",
+      "name": "Check If Data Exists",
+      "notes": "Verifies there are records to load.\nIf no records found, workflow stops safely."
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        480,
+        544
+      ],
+      "id": "f2074230-7c35-482c-a223-9f5b584c1429",
+      "name": "No Data Found - Stopped",
+      "notes": "Workflow stopped because no valid\nrecords were found to load"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- This query does 3 things:\n-- 1. Reads clean data from raw_transactions\n-- 2. Applies business rules (flags cancelled/returns)\n-- 3. Inserts into stg_transactions\n\nINSERT INTO stg_transactions (\n  InvoiceNo, \n  StockCode, \n  Description, \n  Quantity, \n  InvoiceDate,\n  UnitPrice, \n  CustomerID, \n  Country, \n  TotalAmount,\n  is_cancelled, \n  is_return, \n  has_valid_customer, \n  data_quality_flag\n)\nSELECT \n  -- Clean text fields (remove extra spaces)\n  TRIM(InvoiceNo) as InvoiceNo,\n  TRIM(StockCode) as StockCode,\n  TRIM(Description) as Description,\n  \n  -- Keep numbers as-is\n  Quantity,\n  InvoiceDate,\n  UnitPrice,\n  \n  -- Clean optional fields\n  TRIM(CustomerID) as CustomerID,\n  TRIM(Country) as Country,\n  \n  -- Calculate total: Quantity × Price\n  ROUND(Quantity * UnitPrice, 2) as TotalAmount,\n  \n  -- Business Rule: Mark cancelled orders (invoice starts with 'C')\n  CASE WHEN InvoiceNo LIKE 'C%' THEN 1 ELSE 0 END as is_cancelled,\n  \n  -- Business Rule: Mark returns (negative quantity)\n  CASE WHEN Quantity < 0 THEN 1 ELSE 0 END as is_return,\n  \n  -- Business Rule: Check if customer ID exists\n  CASE WHEN CustomerID IS NOT NULL AND CustomerID != '' THEN 1 ELSE 0 END as has_valid_customer,\n  \n  -- Business Rule: Overall data quality assessment\n  CASE \n    WHEN InvoiceNo LIKE 'C%' THEN 'CANCELLED'\n    WHEN Quantity < 0 THEN 'RETURN'\n    WHEN CustomerID IS NULL OR CustomerID = '' THEN 'NO_CUSTOMER'\n    WHEN Description IS NULL OR Description = '' THEN 'NO_DESCRIPTION'\n    ELSE 'VALID'\n  END as data_quality_flag\n  \nFROM ecommerce_source.raw_transactions\n\n-- Only include good quality records:\nWHERE Quantity > 0                              -- Positive quantities only\n  AND CAST(UnitPrice AS DECIMAL(10,2)) > 0      -- Valid prices only\n  AND InvoiceNo IS NOT NULL                      -- Must have invoice number\n  AND StockCode IS NOT NULL                      -- Must have product code\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        480,
+        336
+      ],
+      "id": "383fe597-e58b-4c81-8847-5e55fab20d9e",
+      "name": "Load & Transform Data",
+      "credentials": {
+        "mySql": {
+          "id": "79VXgU4JqrEyvSYO",
+          "name": "staging"
+        }
+      },
+      "notes": "Transforms and loads data in one step:\n\n📥 Reads from: raw_transactions\n📤 Writes to: stg_transactions\n\n🔄 Transformations:\n• Cleans whitespace\n• Calculates TotalAmount\n• Flags cancelled orders\n• Flags returns\n• Marks data quality issues"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -240,
+        448
+      ],
+      "id": "9c851ab5-69a7-4a00-a5fd-4bc016929464",
+      "name": "When clicking ‘Execute workflow’"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Preview Record Count": {
+      "main": [
+        [
+          {
+            "node": "Check If Data Exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check If Data Exists": {
+      "main": [
+        [
+          {
+            "node": "Load & Transform Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Data Found - Stopped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load & Transform Data": {
+      "main": [
+        []
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Preview Record Count",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "7607ca39-ee8b-4c75-b8ec-a8ddad796a18",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "75d453e62c90ae8213d6cfc514012da1c241ae428e7aef6482544cc9442c8339"
+  },
+  "id": "halLQRQxjuvKuzTuY0u83",
+  "tags": []
+}

@@ -1,0 +1,232 @@
+{
+  "name": "Load dim tables",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  'Starting DWH Load' as status,\n  NOW() as start_time,\n  (SELECT COUNT(*) FROM stg_transactions WHERE data_quality_flag = 'VALID') as staging_records",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        48,
+        480
+      ],
+      "id": "78164f7a-5093-498c-91dd-d6be160235a5",
+      "name": "Initialize",
+      "credentials": {
+        "mySql": {
+          "id": "79VXgU4JqrEyvSYO",
+          "name": "staging"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -192,
+        480
+      ],
+      "id": "1407b4e1-58f9-433c-8c49-5ad3a53d253b",
+      "name": "Start"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Step 1: Load Date Dimension from staging\nINSERT INTO dim_date (\n  date_key, date, year, quarter, month, month_name, week, day, \n  day_of_week, day_name, is_weekend, is_month_start, is_month_end\n)\nWITH RECURSIVE date_range AS (\n  SELECT DATE(MIN(InvoiceDate)) as date FROM ecommerce_staging.stg_transactions\n  UNION ALL\n  SELECT DATE_ADD(date, INTERVAL 1 DAY)\n  FROM date_range\n  WHERE date < (SELECT DATE(MAX(InvoiceDate)) FROM ecommerce_staging.stg_transactions)\n)\nSELECT\n  DATE_FORMAT(date, '%Y%m%d') as date_key,\n  date,\n  YEAR(date) as year,\n  QUARTER(date) as quarter,\n  MONTH(date) as month,\n  DATE_FORMAT(date, '%M') as month_name,\n  WEEK(date) as week,\n  DAY(date) as day,\n  DAYOFWEEK(date) as day_of_week,\n  DATE_FORMAT(date, '%W') as day_name,\n  CASE WHEN DAYOFWEEK(date) IN (1, 7) THEN 1 ELSE 0 END as is_weekend,\n  CASE WHEN DAY(date) = 1 THEN 1 ELSE 0 END as is_month_start,\n  CASE WHEN DAY(date) = DAY(LAST_DAY(date)) THEN 1 ELSE 0 END as is_month_end\nFROM date_range\nON DUPLICATE KEY UPDATE year = VALUES(year)",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        272,
+        272
+      ],
+      "id": "c39b22f3-996a-4bfc-8bf0-135cd353206a",
+      "name": "Load Dates",
+      "credentials": {
+        "mySql": {
+          "id": "g54QT242j8qflBEr",
+          "name": "dwh"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Step 2: Load Products from staging\nINSERT INTO dim_products (\n  StockCode, Description, avg_unit_price, first_sold_date, \n  last_sold_date, total_quantity_sold, is_active\n)\nSELECT \n  StockCode,\n  MAX(Description) as Description,\n  ROUND(AVG(UnitPrice), 2) as avg_unit_price,\n  MIN(DATE(InvoiceDate)) as first_sold_date,\n  MAX(DATE(InvoiceDate)) as last_sold_date,\n  SUM(Quantity) as total_quantity_sold,\n  1 as is_active\nFROM ecommerce_staging.stg_transactions\nWHERE data_quality_flag = 'VALID'\nGROUP BY StockCode\nON DUPLICATE KEY UPDATE\n  Description = VALUES(Description),\n  avg_unit_price = VALUES(avg_unit_price),\n  last_sold_date = GREATEST(last_sold_date, VALUES(last_sold_date)),\n  total_quantity_sold = total_quantity_sold + VALUES(total_quantity_sold),\n  updated_at = CURRENT_TIMESTAMP",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        288,
+        448
+      ],
+      "id": "7a33556f-fafc-4b6b-aa17-92055d6899ea",
+      "name": "Load Products",
+      "credentials": {
+        "mySql": {
+          "id": "g54QT242j8qflBEr",
+          "name": "dwh"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Step 3: Load Customers from staging with Segmentation\nINSERT INTO dim_customers (\n  CustomerID, Country, first_purchase_date, last_purchase_date,\n  total_orders, total_spent, customer_segment, is_active\n)\nSELECT \n  CustomerID,\n  MAX(Country) as Country,\n  MIN(DATE(InvoiceDate)) as first_purchase_date,\n  MAX(DATE(InvoiceDate)) as last_purchase_date,\n  COUNT(DISTINCT InvoiceNo) as total_orders,\n  ROUND(SUM(TotalAmount), 2) as total_spent,\n  CASE \n    WHEN SUM(TotalAmount) >= 10000 THEN 'VIP'\n    WHEN SUM(TotalAmount) >= 5000 THEN 'High Value'\n    WHEN SUM(TotalAmount) >= 1000 THEN 'Medium Value'\n    ELSE 'Low Value'\n  END as customer_segment,\n  1 as is_active\nFROM ecommerce_staging.stg_transactions\nWHERE has_valid_customer = 1 AND data_quality_flag = 'VALID'\nGROUP BY CustomerID\nON DUPLICATE KEY UPDATE\n  Country = VALUES(Country),\n  last_purchase_date = GREATEST(last_purchase_date, VALUES(last_purchase_date)),\n  total_orders = total_orders + VALUES(total_orders),\n  total_spent = total_spent + VALUES(total_spent),\n  customer_segment = CASE \n    WHEN total_spent + VALUES(total_spent) >= 10000 THEN 'VIP'\n    WHEN total_spent + VALUES(total_spent) >= 5000 THEN 'High Value'\n    WHEN total_spent + VALUES(total_spent) >= 1000 THEN 'Medium Value'\n    ELSE 'Low Value'\n  END,\n  updated_at = CURRENT_TIMESTAMP",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        288,
+        672
+      ],
+      "id": "5871b9ac-756c-4496-ab35-9bb8b094930a",
+      "name": "Load Customers",
+      "credentials": {
+        "mySql": {
+          "id": "g54QT242j8qflBEr",
+          "name": "dwh"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Step 4: Load Fact Sales from staging\nINSERT INTO fact_sales (\n  date_key, customer_key, product_key, InvoiceNo, Quantity,\n  UnitPrice, TotalAmount, Country, is_cancelled, is_return, transaction_hour\n)\nSELECT \n  DATE_FORMAT(s.InvoiceDate, '%Y%m%d') as date_key,\n  c.customer_key,\n  p.product_key,\n  s.InvoiceNo,\n  s.Quantity,\n  s.UnitPrice,\n  s.TotalAmount,\n  s.Country,\n  s.is_cancelled,\n  s.is_return,\n  HOUR(s.InvoiceDate) as transaction_hour\nFROM ecommerce_staging.stg_transactions s\nINNER JOIN ecommerce_dwh.dim_products p ON s.StockCode = p.StockCode\nLEFT JOIN ecommerce_dwh.dim_customers c ON s.CustomerID = c.CustomerID\nWHERE s.data_quality_flag = 'VALID'\n  AND NOT EXISTS (\n    SELECT 1 FROM ecommerce_dwh.fact_sales f\n    WHERE f.InvoiceNo = s.InvoiceNo\n      AND f.product_key = p.product_key\n      AND f.date_key = DATE_FORMAT(s.InvoiceDate, '%Y%m%d')\n      AND ABS(f.TotalAmount - s.TotalAmount) < 0.01\n  )",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        480,
+        480
+      ],
+      "id": "fbe3749f-8ddc-48cc-b284-b77d54f94d6c",
+      "name": "Load Fact Sales",
+      "credentials": {
+        "mySql": {
+          "id": "g54QT242j8qflBEr",
+          "name": "dwh"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  'Load Complete' as status,\n  NOW() as end_time,\n  (SELECT COUNT(*) FROM dim_date) as total_dates,\n  (SELECT COUNT(*) FROM dim_products) as total_products,\n  (SELECT COUNT(*) FROM dim_customers) as total_customers,\n  (SELECT COUNT(*) FROM fact_sales) as total_sales,\n  (SELECT ROUND(SUM(TotalAmount), 2) FROM fact_sales) as total_revenue",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        704,
+        480
+      ],
+      "id": "fe4294f7-0b6e-4228-a8aa-c283de863b61",
+      "name": "Load Summary",
+      "credentials": {
+        "mySql": {
+          "id": "79VXgU4JqrEyvSYO",
+          "name": "staging"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Initialize": {
+      "main": [
+        [
+          {
+            "node": "Load Dates",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Load Products",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Load Customers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Initialize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Dates": {
+      "main": [
+        [
+          {
+            "node": "Load Fact Sales",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Products": {
+      "main": [
+        [
+          {
+            "node": "Load Fact Sales",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Customers": {
+      "main": [
+        [
+          {
+            "node": "Load Fact Sales",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Fact Sales": {
+      "main": [
+        [
+          {
+            "node": "Load Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "74da0ca6-814d-4492-8b29-3e6b1189d364",
+  "meta": {
+    "instanceId": "75d453e62c90ae8213d6cfc514012da1c241ae428e7aef6482544cc9442c8339"
+  },
+  "id": "IKUVfaOtAyFT-DkYxYPQE",
+  "tags": []
+}

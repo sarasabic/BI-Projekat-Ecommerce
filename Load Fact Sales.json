@@ -1,0 +1,216 @@
+{
+  "name": "Load Fact Sales - OPTIMIZED",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        352,
+        224
+      ],
+      "id": "2cfbf5e7-791d-4bf6-ba1c-256ee636a9f9",
+      "name": "START"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Pre-Flight Check: Ensure all dimensions are ready\nSELECT \n  'FACT_LOAD_PREFLIGHT' as status,\n  NOW() as check_time,\n  (SELECT COUNT(*) FROM ecommerce_dwh.dim_date) as dates_loaded,\n  (SELECT COUNT(*) FROM ecommerce_dwh.dim_products) as products_loaded,\n  (SELECT COUNT(*) FROM ecommerce_dwh.dim_customers) as customers_loaded,\n  (SELECT COUNT(*) FROM ecommerce_staging.stg_transactions WHERE data_quality_flag = 'VALID') as staging_valid_records,\n  (SELECT COUNT(DISTINCT StockCode) FROM ecommerce_staging.stg_transactions WHERE data_quality_flag = 'VALID') as staging_unique_products,\n  CASE \n    WHEN (SELECT COUNT(*) FROM ecommerce_dwh.dim_date) = 0 THEN '❌ dim_date is EMPTY'\n    WHEN (SELECT COUNT(*) FROM ecommerce_dwh.dim_products) = 0 THEN '❌ dim_products is EMPTY'\n    WHEN (SELECT COUNT(*) FROM ecommerce_staging.stg_transactions WHERE data_quality_flag = 'VALID') = 0 THEN '❌ No VALID staging data'\n    ELSE '✅ All dimensions ready'\n  END as preflight_status",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        544,
+        224
+      ],
+      "id": "b2470cfd-398e-4d1d-9e2f-888605448122",
+      "name": "Pre-Flight Check",
+      "credentials": {
+        "mySql": {
+          "id": "g54QT242j8qflBEr",
+          "name": "dwh"
+        }
+      },
+      "notes": "🔍 Validates all dimensions exist\n⚠️ Checks for empty tables\n📊 Shows record counts\n✅ Ensures data integrity"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "check-dimensions",
+              "leftValue": "={{ $json.dates_loaded }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            },
+            {
+              "id": "check-products",
+              "leftValue": "={{ $json.products_loaded }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            },
+            {
+              "id": "check-staging",
+              "leftValue": "={{ $json.staging_valid_records }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        752,
+        224
+      ],
+      "id": "e2d236d0-200d-4425-96ba-a6584a5cb900",
+      "name": "Safety Gate",
+      "notes": "🚦 Quality gate before loading\n✅ All dimensions must exist\n✅ Staging data must be valid\n🛑 Prevents bad data loads"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Join Test: Verify how many records will be loaded\nSELECT \n  'JOIN_TEST' as test_type,\n  COUNT(*) as records_that_will_load,\n  COUNT(DISTINCT s.InvoiceNo) as unique_invoices,\n  COUNT(DISTINCT p.product_key) as unique_products_matched,\n  COUNT(DISTINCT c.customer_key) as unique_customers_matched,\n  COUNT(CASE WHEN c.customer_key IS NULL THEN 1 END) as records_without_customer,\n  ROUND(SUM(s.TotalAmount), 2) as total_revenue,\n  MIN(s.InvoiceDate) as earliest_sale,\n  MAX(s.InvoiceDate) as latest_sale,\n  NOW() as test_time\nFROM ecommerce_staging.stg_transactions s\nINNER JOIN ecommerce_dwh.dim_products p ON s.StockCode = p.StockCode\nLEFT JOIN ecommerce_dwh.dim_customers c ON s.CustomerID = c.CustomerID\nWHERE s.data_quality_flag = 'VALID'",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        944,
+        96
+      ],
+      "id": "d1641639-0012-4b41-a499-ac14b7421c19",
+      "name": "JOIN Test & Preview",
+      "credentials": {
+        "mySql": {
+          "id": "g54QT242j8qflBEr",
+          "name": "dwh"
+        }
+      },
+      "notes": "🔍 Tests JOIN logic before INSERT\n📊 Shows exactly what will load\n⚠️ Identifies unmatched records\n💰 Previews revenue totals"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Load Fact Sales with Duplicate Prevention\nINSERT INTO fact_sales (\n  date_key, customer_key, product_key, InvoiceNo, Quantity,\n  UnitPrice, TotalAmount, Country, is_cancelled, is_return, transaction_hour\n)\nSELECT \n  DATE_FORMAT(s.InvoiceDate, '%Y%m%d') as date_key,\n  c.customer_key,\n  p.product_key,\n  s.InvoiceNo,\n  s.Quantity,\n  s.UnitPrice,\n  s.TotalAmount,\n  s.Country,\n  s.is_cancelled,\n  s.is_return,\n  HOUR(s.InvoiceDate) as transaction_hour\nFROM ecommerce_staging.stg_transactions s\nINNER JOIN ecommerce_dwh.dim_products p ON s.StockCode = p.StockCode\nLEFT JOIN ecommerce_dwh.dim_customers c ON s.CustomerID = c.CustomerID\nWHERE s.data_quality_flag = 'VALID'\n  AND NOT EXISTS (\n    SELECT 1 FROM ecommerce_dwh.fact_sales f\n    WHERE f.InvoiceNo = s.InvoiceNo\n      AND f.product_key = p.product_key\n      AND f.date_key = DATE_FORMAT(s.InvoiceDate, '%Y%m%d')\n      AND ABS(f.TotalAmount - s.TotalAmount) < 0.01\n  )",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        1152,
+        96
+      ],
+      "id": "c03079c6-3cd2-44c7-b0cf-7e68780bfd20",
+      "name": "Load Fact Sales",
+      "credentials": {
+        "mySql": {
+          "id": "g54QT242j8qflBEr",
+          "name": "dwh"
+        }
+      },
+      "notes": "📊 Loads transactional data\n🔗 Links to all dimensions\n🚫 Prevents duplicates\n⏰ Captures transaction hour"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        944,
+        336
+      ],
+      "id": "1799cd79-45b6-465a-84e8-0173210eca96",
+      "name": "FAILED Pre-Flight",
+      "notes": "⚠️ Dimensions not ready\n📝 Run dimension load workflow first\n🔍 Check preflight output for details"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "START": {
+      "main": [
+        [
+          {
+            "node": "Pre-Flight Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pre-Flight Check": {
+      "main": [
+        [
+          {
+            "node": "Safety Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Safety Gate": {
+      "main": [
+        [
+          {
+            "node": "JOIN Test & Preview",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "FAILED Pre-Flight",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "JOIN Test & Preview": {
+      "main": [
+        [
+          {
+            "node": "Load Fact Sales",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Fact Sales": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "b0507554-3aee-4820-8a7f-78f42d3d1ba5",
+  "meta": {
+    "instanceId": "75d453e62c90ae8213d6cfc514012da1c241ae428e7aef6482544cc9442c8339"
+  },
+  "id": "PDFP7G6J7U6pS-YbLtHA7",
+  "tags": []
+}
